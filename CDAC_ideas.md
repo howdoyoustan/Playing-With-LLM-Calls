@@ -1,5 +1,3 @@
-Here is the markdown formatted content, ready to be saved as `README.md` or `AGENTIC_WORKFLOWS.md` in your GitHub repository.
-
 ---
 
 # Agentic Workflows for the PG-DBDA Technical Class Representative
