@@ -14,146 +14,198 @@ The **Syllabus Sentinel** acts as an autonomous auditor. It connects directly to
 
 ## 2. System Architecture
 
-The system follows a standard **ELT (Extract, Load, Transform)** pattern, orchestrated by **Apache Airflow**.
-
-### A. The Ingestion Layer (The Crawler)
-
-* **Source:** Google Classroom REST API.
-* **Targets:**
-* `courses.courseWork` (Assignments/Labs): Tracks practical progress (e.g., "Submit Spark Lab").
-* `courses.courseWorkMaterials` (Slides/Notes): Tracks theoretical progress.
-
-
-* **Frequency:** Daily (via Airflow DAG).
-
-### B. The Processing Layer (The Parser)
-
-* **Text Extraction:**
-* Downloads attachments (PDFs, PPTs, Docx) to a temporary landing zone.
-* Uses **OCR/Text Extraction** (e.g., `unstructured` or `PyPDF2`) to convert slide decks into raw text.
-
-
-* **Metadata Tagging:**
-* Extracts timestamps to correlate content with the timeline (e.g., "Week 12 materials").
-
-
-
-### C. The Agentic Layer (The Sentinel)
-
-This is the core intelligence. It uses an LLM (or semantic search) to compare *what was taught* vs. *what was promised*.
-
-* **Input:** Extracted text from `Day45_Spark.pdf`.
-* **Reference:** The Official PG-DBDA Syllabus (parsed into a Vector Store).
-* **Logic:**
-1. **Identification:** Recognizes the topic is "Apache Spark".
-2. 
-**Depth Check:** Scans for specific required sub-topics like *RDD Persistence* , *Shared Variables* , or *Spark Streaming*.
-
-
-3. **Verdict:**
-* ✅ **Covered:** All key terms found.
-* ⚠️ **Gap Detected:** "Spark RDDs covered, but 'Integration with Kafka'  is missing."
-
-
-
-
-
-
+Here is the comprehensive architectural design for the **Syllabus Sentinel** implemented using **LangGraph**. This design leverages LangGraph's stateful orchestration to handle the cyclical nature of checking, validating, and reporting on course progress.
 
 ---
 
-## 3. Implementation Logic
+# The Syllabus Sentinel (LangGraph Architecture)
 
-### Step 1: Syllabus Indexing (One-time Setup)
+**Project Goal:** To build an autonomous "Academic Auditor" agent that ensures the **PG-DBDA** curriculum is delivered as promised. It validates daily **Google Classroom** uploads against the official **C-DAC Syllabus**, distinguishing between "Theory" and "Lab" hours.
 
-The Agent first "learns" the curriculum by ingesting the `PG-DBDA August 2025 Syllabus.pdf`. It breaks it down into granular checkpoints:
+**Core Tech:** LangGraph (State Orchestration), Google Classroom API (Source), Vector Database (Syllabus Knowledge), and LLM (Evaluator).
 
-* 
-**Module 6 (Big Data):** 150 Hours.
+---
 
+## 1. System High-Level Design
 
-* 
-*Checkpoint:* "Design of HDFS" 
+The system is modeled as a **StateGraph**. Unlike a linear pipeline, this graph maintains a "memory" of the current audit session, allowing the agent to dynamically decide if it needs to fetch more context or flag a partial coverage issue.
 
+### The Graph State (`AuditState`)
 
-* 
-*Checkpoint:* "Map Reduce Failures" 
-
-
-* 
-*Checkpoint:* "Apache Airflow" 
-
-
-
-
-
-### Step 2: The Airflow DAG (Daily Run)
-
-A Python DAG runs every evening at 18:00.
+This dictionary is passed between all nodes, maintaining the context of the current run.
 
 ```python
-# Pseudo-code for the Syllabus Sentinel DAG
-
-@task
-def fetch_classroom_materials():
-    """Hits Google Classroom API to get today's slides/labs"""
-    # Returns: ["intro_to_spark.pdf", "lab_manual_05.docx"]
-    pass
-
-@task
-def extract_context(files):
-    """Converts PDF/Docx to string content"""
-    # Returns: "Today we discussed RDDs, Transformations, and Actions..."
-    pass
-
-@task
-def gap_analysis_agent(daily_context):
-    """
-    Agent Prompt:
-    'You are a rigorous Academic Auditor. 
-    Compare the following class notes: {daily_context}
-    Against the syllabus requirements for 'Module 6'.
-    
-    Did the faculty cover 'Shuffle and Sort' and 'Partitioner' logic?
-    Output a completion score (0-100%).'
-    """
-    pass
-
-@task
-def update_dashboard(gaps):
-    """Updates the CR's Streamlit Dashboard"""
-    # If gap found -> Flag "Needs Review"
-    pass
+class AuditState(TypedDict):
+    current_date: str
+    materials_found: List[Dict]      # Metadata from Google Classroom
+    extracted_content: str           # Raw text from PDFs/Slides
+    identified_module: str           # e.g., "Module 6: Big Data"
+    syllabus_requirements: List[str] # Retrieved from RAG (e.g., "HDFS Architecture")
+    coverage_gaps: List[str]         # Output of the Gap Analysis
+    report_status: str               # "draft", "sent", "failed"
 
 ```
 
 ---
 
-## 4. Value for the Technical Class Representative (CR)
+## 2. The Node Architecture
 
-1. **Automated Audit Trail:**
-* If students complain that "Practical Machine Learning" was rushed, the CR has data: "On Nov 12th, only 14 slides were uploaded for 'Gradient Boosting', covering 5% of the required topics."
+The workflow consists of **5 primary nodes** and **2 conditional edges**.
 
+### Node 1: `fetch_classroom_materials` (The Crawler)
 
-
-
-2. **Lab vs. Theory Distinction:**
-* The system distinguishes between a **Lecture** (Theory) and a **Lab Assignment** (Practice), ensuring the 900-hour split (Theory + Lab + Project)  is respected.
-
+* **Function:** Connects to the **Google Classroom REST API**.
+* **Action:**
+* Queries `courses.courseWork` (Assignments/Labs) and `courses.courseWorkMaterials` (Theory).
 
 
+* Filters for items posted within the last 24 hours.
 
-3. **Conflict Resolution:**
-* Provides objective data for meetings with the Course Coordinator, removing emotion from the feedback loop.
+
+* **State Update:** Populates `materials_found` with file IDs and titles.
+
+### Node 2: `classify_and_extract` (The Parser)
+
+* **Function:** Downloads files and extracts text.
+* **Action:**
+* Uses `unstructured` or `pypdf` to parse content.
+* **Intelligent Routing (Agent Decision):** Determines if the content is **Lab** (code snippets, manuals) or **Theory** (slides, conceptual diagrams). This is crucial because the syllabus allocates specific hours to each (e.g., 150 hours for Big Data).
+
+
+
+
+* **State Update:** Updates `extracted_content`.
+
+### Node 3: `retrieve_syllabus_context` (The RAG Node)
+
+* **Function:** Fetches the "Ground Truth" from the vector database.
+* **Action:**
+* Performs a semantic search on the `extracted_content`.
+* 
+*Example:* If the slide mentions "RDDs", it retrieves the specific line items from **Module 6**: "Resilient Distributed Datasets (RDDs), External Datasets, RDD Operations".
+
+
+
+
+* **State Update:** Populates `syllabus_requirements`.
+
+### Node 4: `evaluate_coverage` (The Auditor Agent)
+
+* **Function:** The "Brain" of the operation.
+* **Prompt Logic:**
+> "You are the C-DAC Course Auditor.
+> **Requirement:** {syllabus_requirements}
+> **Evidence:** {extracted_content}
+> Compare them strictly. Did the evidence cover 'Job Optimization' and 'Shuffle Operations'?
+> If partially covered, list the missing sub-topics."
+
+
+* **State Update:** specific items are added to `coverage_gaps`.
+
+### Node 5: `generate_report` (The Notifier)
+
+* **Function:** formats the output for the Class Representative.
+* **Action:** Creates a Markdown summary or a structured JSON record for the dashboard.
+
+---
+
+## 3. The Control Flow (Edges)
+
+### Conditional Edge A: `has_new_materials?`
+
+* **Logic:** After `fetch_classroom_materials`, checks if the list is empty.
+* **If Empty:**  `END` (No cost incurred).
+* **If Present:**  `classify_and_extract`.
+
+
+
+### Conditional Edge B: `requires_deep_scan?`
+
+* **Logic:** After `evaluate_coverage`, the Agent self-reflects.
+* **Scenario:** The slides were too vague (e.g., just images).
+* **Action:** The Agent can route *back* to `fetch_classroom_materials` to check for "Class Comments" or "attached links" for more context (Looping capability).
+* **Else:**  `generate_report`.
 
 
 
 ---
 
-## 5. Recommended Tech Stack
+## 4. Implementation Details (Python & LangGraph)
 
-* **Orchestration:** Apache Airflow (running on Docker).
-* **API Integration:** `google-api-python-client`.
-* **PDF Parsing:** `pypdf` or `langchain` document loaders.
-* **Logic:** Python 3.9+ with `pandas` for tracking state.
-* **Database:** SQLite or PostgreSQL (to store the "Checklist" state).
+```python
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, List
+
+# 1. Define State
+class AuditState(TypedDict):
+    materials: List[str]
+    syllabus_context: str
+    audit_report: str
+
+# 2. Define Nodes
+def fetch_materials(state):
+    # Google Classroom API logic here
+    # Check courseWorkMaterials vs courseWork for Theory vs Lab separation
+    return {"materials": ["slide_deck_v1.pdf"]}
+
+def retrieve_syllabus(state):
+    # Query Pinecone/Chroma for "Module 6: Big Data" requirements
+    # [cite_start]e.g., "HDFS Java API, Map Reduce Anatomy, Failures" [cite: 96]
+    return {"syllabus_context": "Required: HDFS Architecture, NameNode, DataNode..."}
+
+def audit_agent(state):
+    # LLM comparison logic
+    return {"audit_report": "Gap Detected: 'Failures' in MapReduce not covered."}
+
+# 3. Build Graph
+workflow = StateGraph(AuditState)
+
+# Add Nodes
+workflow.add_node("crawler", fetch_materials)
+workflow.add_node("rag_retriever", retrieve_syllabus)
+workflow.add_node("auditor", audit_agent)
+
+# Add Edges
+workflow.set_entry_point("crawler")
+workflow.add_edge("crawler", "rag_retriever")
+workflow.add_edge("rag_retriever", "auditor")
+workflow.add_edge("auditor", END)
+
+# Compile
+app = workflow.compile()
+
+```
+
+---
+
+## 5. Technology Stack
+
+| Component | Tool | Purpose |
+| --- | --- | --- |
+| **Orchestrator** | **LangGraph** | Managing the cyclic workflow and state. |
+| **LLM** | **GPT-4o** or **Claude 3.5 Sonnet** | High-reasoning capability for "Gap Analysis". |
+| **Vector Store** | **ChromaDB** (Local) or **Pinecone** | Storing the chunked PDF Syllabus (e.g., Module definitions). |
+| **Ingestion** | **Google Classroom API** | Fetching daily `courseWork` and `materials`. |
+| **Parsing** | **Unstructured.io** | Extracting text from PDF slides and Lab Manuals. |
+| **Deployment** | **Docker** | Containerizing the Python environment. |
+
+---
+
+## 6. Specific Syllabus Mapping Strategy
+
+To ensure high accuracy, the Vector Store will be indexed by **Module ID**:
+
+* 
+**Index Key `MOD_01` (Linux):** Covers "Installation, Shells, Commands".
+
+
+* 
+**Index Key `MOD_06` (Big Data):** Covers "Hadoop, HDFS, Map Reduce, Spark".
+
+
+* 
+**Index Key `MOD_08` (ML):** Covers "Supervised/Unsupervised Learning, Kmeans, KNN".
+
+
+
+This allows the Agent to fetch the *exact* checklist for the day's topic.
