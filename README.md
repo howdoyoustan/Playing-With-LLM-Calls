@@ -2,4 +2,5 @@
 Personal Project to Learn Agentic Framework / Lack Of
 
 ## Starting with Open-AI SDK for the Quiz Application 
-----Will update reasoning here everyday----
+I have been thinking about 3 different paths for students to choose from 
+1.**The Tutor Path** : Useful to learn during the module 
